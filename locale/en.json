@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Whale Eyes",
+    "description": "Gives the model a screen_sight tool: foreground app, window title, focused control and open windows as a short summary, read through UI Automation without screenshots."
+  }
+}

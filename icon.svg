@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Whale Eye">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d3550"/>
+      <stop offset="1" stop-color="#071b2b"/>
+    </linearGradient>
+    <radialGradient id="iris" cx="0.42" cy="0.38" r="0.68">
+      <stop offset="0" stop-color="#8fe3ff"/>
+      <stop offset="0.62" stop-color="#2f95c8"/>
+      <stop offset="1" stop-color="#12496b"/>
+    </radialGradient>
+  </defs>
+  <rect x="2" y="2" width="124" height="124" rx="28" fill="url(#sea)"/>
+  <path d="M17 84c14-9 33-13 47-13s33 4 47 13c-6 14-25 24-47 24S23 98 17 84z" fill="#123f5c" opacity="0.85"/>
+  <ellipse cx="64" cy="58" rx="35" ry="26" fill="#f4fbff"/>
+  <circle cx="64" cy="58" r="19" fill="url(#iris)"/>
+  <circle cx="64" cy="58" r="9" fill="#06202f"/>
+  <circle cx="55.5" cy="49.5" r="6" fill="#ffffff" opacity="0.92"/>
+  <circle cx="74" cy="66" r="2.6" fill="#ffffff" opacity="0.55"/>
+  <path d="M96 101c7-7 15-9 22-8-3 8-9 13-16 15 3-3 4-6 4-9-3 2-6 3-10 2z" fill="#5ec8f0" opacity="0.9"/>
+</svg>

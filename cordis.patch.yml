@@ -1,0 +1,12 @@
+# dsh-whale-eyes bundle patch
+#
+# 一行主机插件：注册 screen_sight 工具，让模型能「看一眼」主人的屏幕。
+# 采集在 runtime/daemon.ps1（UI Automation，不截屏），这里只是外壳。
+- insert:
+    - id: whale-eyes
+      name: 'dsh-whale-eyes'
+      config:
+        # 守护进程起始端口；被占用时会往后找（最多 +9）
+        port: 8791
+        # 默认 token 预算，工具调用时可用 budget 参数覆盖
+        budget: 220

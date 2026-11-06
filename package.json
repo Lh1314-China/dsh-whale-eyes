@@ -1,0 +1,69 @@
+{
+  "name": "dsh-whale-eyes",
+  "version": "0.1.0",
+  "description": "Give the DeepSeek Harness model a screen-sense tool: foreground app, window title, focused control and open windows as a short summary — no screenshots. 给 DSH 的模型一双不截屏的眼睛。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "runtime/*.ps1",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.1-rc.2 <0.4.0",
+      "node": ">=20",
+      "profiles": [
+        "desktop",
+        "web"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "win32"
+  ],
+  "scripts": {
+    "check": "node --check index.js"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "screen",
+    "screen-sense",
+    "accessibility",
+    "uia",
+    "screenshot-free",
+    "token-saving",
+    "windows"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lh1314-China/dsh-whale-eyes.git"
+  },
+  "homepage": "https://github.com/Lh1314-China/dsh-whale-eyes#readme",
+  "bugs": {
+    "url": "https://github.com/Lh1314-China/dsh-whale-eyes/issues"
+  },
+  "author": "小鲸 & 凌寒",
+  "license": "MIT"
+}
