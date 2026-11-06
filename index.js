@@ -10,7 +10,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,13 @@ let starting = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 主机进程的 PATH 未必包含 PowerShell，优先按绝对路径找。 */
+function resolvePowerShell() {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const absolute = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return existsSync(absolute) ? absolute : 'powershell.exe';
 }
 
 /** 守护进程会把实际端口写在自己目录的 port.txt 里。 */
@@ -88,23 +95,114 @@ async function ping(port) {
   }
 }
 
+const DAEMON_LOG = path.join(RUNTIME, 'daemon.log');
+
+/** 守护进程自己的控制台输出（出错时才有人看）。 */
+function daemonLogTail(max = 800) {
+  try {
+    if (!existsSync(DAEMON_LOG)) return '(no daemon log)';
+    const text = readFileSync(DAEMON_LOG, 'utf8');
+    return text.length > max ? `…${text.slice(-max)}` : text;
+  } catch {
+    return '(unreadable daemon log)';
+  }
+}
+
 /** 只在确实没有守护进程时才拉起一个，避免同机跑两个 UIA 轮询器。 */
 async function startDaemon(basePort) {
   if (!existsSync(DAEMON)) throw new Error(`screen daemon script missing: ${DAEMON}`);
+
+  let fd = 'ignore';
+  try {
+    fd = openSync(DAEMON_LOG, 'a');
+  } catch {
+    /* 日志打不开也照常启动 */
+  }
   const child = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DAEMON, '-Port', String(basePort)],
-    { cwd: RUNTIME, detached: true, stdio: 'ignore', windowsHide: true },
+    resolvePowerShell(),
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', DAEMON, '-Port', String(basePort)],
+    { cwd: RUNTIME, detached: true, stdio: ['ignore', fd, fd], windowsHide: true },
   );
   child.unref();
+  if (typeof fd === 'number') {
+    try {
+      closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // spawn 失败（解释器找不到、被安全软件拦下）不会抛，只会发一个 error 事件
+  let spawnError = null;
+  child.on('error', (err) => {
+    spawnError = err;
+  });
 
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await sleep(250);
     const port = readPort(basePort);
     if (await ping(port)) return port;
+    if (spawnError) throw new Error(`cannot start PowerShell (${spawnError.message})`);
+    if (child.exitCode !== null) {
+      throw new Error(`screen daemon exited with code ${child.exitCode}; log: ${daemonLogTail()}`);
+    }
   }
-  throw new Error(`screen daemon did not come up within ${START_TIMEOUT_MS}ms (port ${basePort})`);
+  try {
+    child.kill();
+  } catch {
+    /* ignore */
+  }
+  throw new Error(`screen daemon silent for ${START_TIMEOUT_MS}ms (port ${basePort}); log: ${daemonLogTail()}`);
+}
+
+/**
+ * 兜底：没有守护进程时直接跑一次性采集（约 1.5～2.5 秒），
+ * 慢，但不会因为守护进程起不来就完全失明。
+ */
+function runOnce(budget) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      resolvePowerShell(),
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', DAEMON, '-Once', '-Budget', String(budget)],
+      { cwd: RUNTIME, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+      reject(new Error('one-shot screen read timed out'));
+    }, 15_000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      out += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      err += chunk;
+    });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`one-shot read failed (code ${code}): ${err.trim().slice(0, 300)}`));
+        return;
+      }
+      const line = out.trim().split(/\r?\n/).pop() || '';
+      try {
+        resolve(JSON.parse(line));
+      } catch {
+        reject(new Error(`one-shot read returned unparsable output: ${line.slice(0, 200)}`));
+      }
+    });
+  });
 }
 
 async function ensureDaemon(basePort) {
@@ -214,10 +312,16 @@ export function apply(ctx, config = {}) {
         const raw = Number(args?.budget);
         const budget = Number.isFinite(raw) ? Math.min(400, Math.max(25, Math.round(raw))) : defaultBudget;
 
-        const port = await ensureDaemon(basePort);
-        const res = await rpc(port, { op: 'digest', budget }, 4000);
+        let res = null;
+        try {
+          const port = await ensureDaemon(basePort);
+          res = await rpc(port, { op: 'digest', budget }, 4000);
+        } catch {
+          // 守护进程那条路过不去（起不来 / 半路死了），退回一次性采集
+          res = await runOnce(budget);
+        }
         if (!res || res.ok !== true) {
-          throw new Error(`screen daemon error: ${(res && res.error) || 'no response'}`);
+          throw new Error(`screen read failed: ${(res && res.error) || 'no response'}`);
         }
         return { summary: formatDigest(res.digest) };
       },

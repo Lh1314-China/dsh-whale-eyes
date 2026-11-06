@@ -1,4 +1,4 @@
-﻿<#
+<#
   dsh-screen-sense / daemon prototype (P0)
   - resident: polls UI Automation + Win32, keeps a change log
   - serves a newline-JSON protocol on 127.0.0.1:8791
@@ -13,7 +13,9 @@
 #>
 param(
     [int]$Port = 8791,
-    [int]$PollMs = 250
+    [int]$PollMs = 250,
+    [switch]$Once,
+    [int]$Budget = 220
 )
 
 $ErrorActionPreference = "Stop"
@@ -141,6 +143,32 @@ function Read-Windows {
         }
     } catch { }
     return $out
+}
+
+# ---- 一次性模式：采一次、打一行 JSON、退出（守护进程起不来时的兜底路径） ----
+if ($Once) {
+    try {
+        $fg = Read-Foreground
+        $full = [ordered]@{
+            app   = $fg.app
+            title = $fg.title
+            focus = $fg.focus
+            wins  = @(Read-Windows)
+        }
+        $packed = Compress-Digest $full $Budget
+        $resp = [ordered]@{
+            ok     = $true
+            once   = $true
+            tokens = $packed.tokens
+            budget = $Budget
+            digest = $packed.data
+        }
+    } catch {
+        $resp = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" }
+    }
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    Write-Output ($resp | ConvertTo-Json -Depth 6 -Compress)
+    exit 0
 }
 
 # ---------------- state ----------------

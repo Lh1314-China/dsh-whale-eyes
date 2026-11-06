@@ -6,3 +6,4 @@ runtime/port.txt
 runtime/captures/
 .DS_Store
 Thumbs.db
+runtime/daemon.log
