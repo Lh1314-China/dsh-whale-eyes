@@ -118,10 +118,12 @@ async function startDaemon(basePort) {
   } catch {
     /* 日志打不开也照常启动 */
   }
+  // 注意：这里**不能**用 detached。实测在本环境里，detached 子进程会立刻 exit=0 退出、
+  // 根本不执行脚本（对照实验：detached 三种组合全 FAIL，不 detached 立刻绑上端口）。
   const child = spawn(
     resolvePowerShell(),
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', DAEMON, '-Port', String(basePort)],
-    { cwd: RUNTIME, detached: true, stdio: ['ignore', fd, fd], windowsHide: true },
+    { cwd: RUNTIME, stdio: ['ignore', fd, fd], windowsHide: true },
   );
   child.unref();
   if (typeof fd === 'number') {
