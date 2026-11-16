@@ -2,6 +2,38 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] — 2026-11-16
+
+装进 profile 后按「每个入口都点一遍」验的，抓到一个真泄漏和两个小洞。
+
+### 修复
+
+- **密码框从 UIA 的 `Name` 泄漏明文**（实测）：WinForms 的密码输入框 `IsPassword` 不生效，而且明文就放在 `Name` 里；0.2.0 只挡了 `ValuePattern`，所以 `include_text:false` 也会把密码漏出去。现在加第二道闸：拿焦点控件的 HWND 查 Win32 样式 `ES_PASSWORD`，命中就把 `name` 和 `value` 一起换成 `[password]`。
+- **没有 `ValuePattern` 的输入框（WinForms TextBox）`Name` 就是内容**：默认也会被读出来，和「默认不读文本」的承诺不符。现在这类控件在 `values:false` 时不下发 name。
+- **脚本指纹改成按需计算**：早期版本在模块加载时把 `daemon.ps1` 的 hash 算死，开发期改完脚本插件不认、只能重启 DSH。现在按 mtime 缓存，改完下次调用就能发现端口上那份是旧的。
+
+### 验证（可复现）
+
+- 靶场一：`UseSystemPasswordChar = $true` 的 WinForms 密码框，值 `hunter2-THIS-MUST-NOT-LEAK`
+  - `include_text:true` → `focus.name = [password]`、`value = [password]`，全文搜不到 `hunter2`
+- 靶场二：同一窗口里普通输入框 `visible-text-123`
+  - `values:false` → 不下发控件文本（focus 折叠）
+  - `values:true` → `focus.name = visible-text-123`，且密码框仍未出现
+- 宿主侧：`screen_sight` 连调两次（220 / 25 预算）都正常，`ping` 的 `sha256` 与本地脚本逐字节一致
+
+### 重启后长跑（10 分钟，每秒采样，597 个样本）
+
+| 指标 | 数值 |
+|---|---|
+| 均值 | **0.468%** 单核 |
+| p50 | 0 |
+| p95 | 1.56% |
+| p99 | 3.12% |
+| 峰值 | 7.81% |
+| 工作集 | 123 MB |
+
+一半以上的秒是 0——循环大部分时间阻塞在 `Socket.Poll` 上；尖峰来自 5s 一次的窗口采样、GC，以及这段时间里我自己打的几次 `digest`。热路径 `digest` 往返 13–18ms。
+
 ## [0.2.0] — 2026-11-16
 
 这一版是「按需采集」重写：守护进程平时几乎不做事，被调用才看一眼。

@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, statSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +45,22 @@ function hashFile(file) {
 }
 
 const VERSION = readVersion();
-const DAEMON_HASH = hashFile(DAEMON);
+
+// 脚本指纹按需算：只看 mtime，变了才重算。
+// 这样开发期改 daemon.ps1 之后，插件下一次调用就会认出「端口上那个是旧的」，
+// 不用重启 DSH 也能换掉它（早期版本把 hash 在模块加载时算死，改完文件它不知道）。
+let hashCache = { mtime: -1, hash: '' };
+function daemonHash() {
+  try {
+    const st = statSync(DAEMON);
+    if (st.mtimeMs !== hashCache.mtime) {
+      hashCache = { mtime: st.mtimeMs, hash: hashFile(DAEMON) };
+    }
+    return hashCache.hash;
+  } catch {
+    return '';
+  }
+}
 
 export const name = 'whale-eyes';
 
@@ -128,8 +143,9 @@ async function pingInfo(port, timeoutMs = 700) {
 }
 
 function hashMatches(res) {
-  if (!res || !DAEMON_HASH) return false;
-  return typeof res.sha256 === 'string' && res.sha256.toUpperCase() === DAEMON_HASH;
+  const want = daemonHash();
+  if (!res || !want) return false;
+  return typeof res.sha256 === 'string' && res.sha256.toUpperCase() === want;
 }
 
 /** 守护进程自己的控制台输出（出错时才有人看）。 */

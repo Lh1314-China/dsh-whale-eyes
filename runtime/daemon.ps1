@@ -158,30 +158,58 @@ function Get-FocusState([bool]$values) {
         $fe = $AE::FocusedElement
         if (-not $fe) { return $null }
 
-        # 第一道闸：读任何值之前先看 IsPassword（抛异常的 provider 一律按密文处理）
+        $hwnd = 0
+        try { $hwnd = [int64]$fe.Current.NativeWindowHandle } catch { $hwnd = 0 }
+
+        # 第一道闸：IsPassword（抛异常的 provider 一律按密文处理）
         $isPassword = $true
         try { $isPassword = [bool]$fe.Current.IsPassword } catch { $isPassword = $true }
 
+        # 第二道闸：Win32 编辑框的 ES_PASSWORD 样式。
+        # 实测（2026-11-16）：WinForms 密码框的 IsPassword 不生效，而且 UIA 的 Name
+        # 里就是明文——只挡 ValuePattern 会从 name 漏出去。
+        if (-not $isPassword -and $hwnd -ne 0) {
+            try {
+                if (([WY.Win32]::GetWindowLong([IntPtr]$hwnd, -16) -band 0x0020) -ne 0) { $isPassword = $true }
+            } catch { }
+        }
+
         $role = try { $fe.Current.ControlType.ProgrammaticName -replace '^ControlType\.', '' } catch { "" }
+
+        if ($isPassword) {
+            # 名字和值一起遮：密码框的 name 也可能是明文
+            return [ordered]@{ role = $role; name = "[password]"; value = "[password]"; hwnd = $hwnd }
+        }
+
+        $cls = if ($hwnd -ne 0) { Get-ClassOf ([IntPtr]$hwnd) } else { "" }
+        $editLike = ($role -eq "Edit") -or ($cls -match '(?i)(^|\.)edit(\b|\.)')
+
+        # 有些 provider（WinForms TextBox 实测）没有 ValuePattern，UIA 的 Name 就是输入内容本身。
+        # 这种控件的 name 属于「文本」，默认不读；要读得显式 values=true。
+        $hasValuePattern = $false
+        $vtext = ""
+        try {
+            $vp = $fe.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+            if ($vp) {
+                $hasValuePattern = $true
+                $vtext = [string]$vp.Current.Value
+            }
+        } catch { $hasValuePattern = $false }
+
         $fname = try { $fe.Current.Name } catch { "" }
+        if ($editLike -and -not $hasValuePattern -and -not $values) { $fname = "" }
         if ($fname -and $fname.Length -gt 40) { $fname = $fname.Substring(0, 40) }
 
         $fval = ""
-        if ($values -and -not $isPassword) {
-            try {
-                $vp = $fe.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-                if ($vp) { $fval = [string]$vp.Current.Value }
-            } catch { $fval = "" }
-            if ($fval.Length -gt 60) { $fval = $fval.Substring(0, 60) }
-        } elseif ($isPassword) {
-            $fval = "[password]"
+        if ($values -and $hasValuePattern -and $vtext) {
+            $fval = if ($vtext.Length -gt 60) { $vtext.Substring(0, 60) } else { $vtext }
         }
 
         [ordered]@{
-            role = $role
-            name = $fname
+            role  = $role
+            name  = $fname
             value = $fval
-            hwnd = try { [int64]$fe.Current.NativeWindowHandle } catch { 0 }
+            hwnd  = $hwnd
         }
     } catch {
         return $null

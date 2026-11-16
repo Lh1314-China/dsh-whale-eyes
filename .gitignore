@@ -7,3 +7,4 @@ runtime/captures/
 .DS_Store
 Thumbs.db
 runtime/daemon.log
+runtime/cpu-*.json
