@@ -250,6 +250,7 @@ async function startDaemon(basePort) {
  */
 function runOnce(budget, values) {
   return new Promise((resolve, reject) => {
+    const extra = values ? ['-Values'] : [];
     const child = spawn(
       resolvePowerShell(),
       [
@@ -264,6 +265,7 @@ function runOnce(budget, values) {
         String(budget),
         '-Version',
         VERSION,
+        ...extra,
       ],
       { cwd: RUNTIME, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
     );
@@ -307,7 +309,6 @@ function runOnce(budget, values) {
         reject(new Error(`one-shot read returned unparsable output: ${line.slice(0, 200)}`));
       }
     });
-    void values; // 一次性路径固定不读控件文本
   });
 }
 

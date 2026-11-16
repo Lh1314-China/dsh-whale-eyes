@@ -2,6 +2,23 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] — 2026-11-16
+
+自检这一轮把 0.2.1 没点过的入口补上了，并修掉两处不一致。
+
+### 自检补测（0.2.1 没覆盖的）
+
+- `captures`：造 3 个假图 → 默认只报数（`count: 3`、`keep: 20`、一个没删）→ 显式 `prune:true, keep:1` 才删掉 2 个、留 1 个。**默认确实不会动手**。
+- `region` 10×10：136ms，落 5×5 PNG（165 B），删掉后归零。
+- `screen`：整虚拟屏 scale 0.05 → 271ms，144×96 PNG（11.6 KB，约 18 token）。0.2.0 那个「找不到 System.Windows.Forms」确实没了。
+- 半开连接：连上不发数据，占用期间再 `ping` 依旧 42ms 应答，超时后自动断开，daemon 没卡死。
+- 守护进程被杀：`Stop-Process` 后下一次 `screen_sight` 自动重拉（新 pid、hash 一致、热调用 24ms）。
+
+### 修复
+
+- **一次性兜底路径会静默忽略 `include_text`**：daemon 起不来时走 `-Once`，以前固定 `values=false`，模型要了文本也拿不到，还不报错。现在 `-Once` 支持 `-Values`，插件兜底时透传。
+- 窗口列表上限对齐：daemon 给 8 条、`formatDigest` 只显示 5 条，白算还占预算。两边统一 5 条。
+
 ## [0.2.1] — 2026-11-16
 
 装进 profile 后按「每个入口都点一遍」验的，抓到一个真泄漏和两个小洞。

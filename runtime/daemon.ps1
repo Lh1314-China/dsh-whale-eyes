@@ -26,7 +26,9 @@ param(
     [int]$Port = 8791,
     [int]$Budget = 220,
     [string]$Version = "",
-    [switch]$Once
+    [switch]$Once,
+    # 一次性模式也要能要控件文本：以前兜底路径静默忽略 include_text
+    [switch]$Values
 )
 
 $ErrorActionPreference = "Stop"
@@ -258,7 +260,7 @@ function Get-Digest([int]$budget, [bool]$values) {
         app   = $app
         title = Limit-Text $fg.title 64
         focus = $focus
-        wins  = Read-Windows $fg.title 8
+        wins  = Read-Windows $fg.title 5
     }
     return (Compress-Digest $full $budget)
 }
@@ -313,7 +315,7 @@ function Test-TcpPort([int]$p, [int]$timeoutMs = 150) {
 # ---- 一次性模式：采一次、打一行 JSON、退出 ------------------------------
 if ($Once) {
     try {
-        $packed = Get-Digest $Budget $false
+        $packed = Get-Digest $Budget $Values.IsPresent
         $resp = [ordered]@{
             ok      = $true
             once    = $true
