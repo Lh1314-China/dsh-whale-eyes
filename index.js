@@ -1,15 +1,17 @@
 /**
- * dsh-whale-eyes — 给模型一只不截屏的眼睛。
+ * dsh-whale-eyes — 给模型一只不截屏的眼睛。 0.2.0
  *
  * 做三件事：
  *   1. 确保屏幕守护进程（PowerShell + UI Automation）在跑，不截屏
- *   2. 注册 `screen_sight` 工具：把当前屏幕压成一份 50~130 token 的短摘要
- *   3. 卸载时只摘掉自己的注册，不碰守护进程（它可能是别人起的）
+ *   2. 注册 `screen_sight` 工具：把当前屏幕压成一份几十 token 的短摘要
+ *   3. 认得自己那份脚本：端口上的 daemon 若脚本 hash 不符（旧版 / 别人那份），
+ *      先让它退场再拉起，避免「装的是新的、跑的是旧的」
  *
  * 真正的采集逻辑在 runtime/daemon.ps1，这里只是壳。
  */
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -18,10 +20,32 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME = path.join(HERE, 'runtime');
 const DAEMON = path.join(RUNTIME, 'daemon.ps1');
-const PORT_FILE = path.join(RUNTIME, 'port.txt');
+const DAEMON_LOG = path.join(RUNTIME, 'daemon.log');
 
 const PORT_SPAN = 10;
-const START_TIMEOUT_MS = 12_000;
+const START_DEADLINE_FIRST_MS = 10_000; // 第一次（可能被 Defender 扫脚本拖慢）
+const START_DEADLINE_RETRY_MS = 4_000; // 之后
+const MAX_BACKOFF_MS = 60_000;
+
+function readVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(HERE, 'package.json'), 'utf8'));
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function hashFile(file) {
+  try {
+    return createHash('sha256').update(readFileSync(file)).digest('hex').toUpperCase();
+  } catch {
+    return '';
+  }
+}
+
+const VERSION = readVersion();
+const DAEMON_HASH = hashFile(DAEMON);
 
 export const name = 'whale-eyes';
 
@@ -30,6 +54,25 @@ export const inject = ['tools'];
 
 let readyPort = null;
 let starting = null;
+let everStarted = false;
+
+// 失败退避：1 → 2 → 4 → … → 60s。守护进程一时起不来时，别让每次调用都等满超时。
+let failures = 0;
+let nextTryAt = 0;
+
+function backoffMs() {
+  return Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.max(0, failures - 1));
+}
+
+function noteFailure() {
+  failures += 1;
+  nextTryAt = Date.now() + backoffMs();
+}
+
+function noteSuccess() {
+  failures = 0;
+  nextTryAt = 0;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -40,19 +83,6 @@ function resolvePowerShell() {
   const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   const absolute = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return existsSync(absolute) ? absolute : 'powershell.exe';
-}
-
-/** 守护进程会把实际端口写在自己目录的 port.txt 里。 */
-function readPort(fallback) {
-  try {
-    if (existsSync(PORT_FILE)) {
-      const v = readFileSync(PORT_FILE, 'utf8').trim();
-      if (/^\d+$/.test(v)) return Number(v);
-    }
-  } catch {
-    /* 读不到就用默认端口 */
-  }
-  return fallback;
 }
 
 /** 一行 JSON 请求，一行 JSON 应答。 */
@@ -86,16 +116,21 @@ function rpc(port, payload, timeoutMs = 4000) {
   });
 }
 
-async function ping(port) {
+/** 只认「脚本 hash 对得上」的 daemon；hash 缺失（0.1.x）也算不认识。 */
+async function pingInfo(port, timeoutMs = 700) {
   try {
-    const res = await rpc(port, { op: 'ping' }, 700);
-    return res !== null && typeof res === 'object' && res.ok === true;
+    const res = await rpc(port, { op: 'ping' }, timeoutMs);
+    if (!res || res.ok !== true) return null;
+    return res;
   } catch {
-    return false;
+    return null;
   }
 }
 
-const DAEMON_LOG = path.join(RUNTIME, 'daemon.log');
+function hashMatches(res) {
+  if (!res || !DAEMON_HASH) return false;
+  return typeof res.sha256 === 'string' && res.sha256.toUpperCase() === DAEMON_HASH;
+}
 
 /** 守护进程自己的控制台输出（出错时才有人看）。 */
 function daemonLogTail(max = 800) {
@@ -108,21 +143,38 @@ function daemonLogTail(max = 800) {
   }
 }
 
-/** 只在确实没有守护进程时才拉起一个，避免同机跑两个 UIA 轮询器。 */
-async function startDaemon(basePort) {
-  if (!existsSync(DAEMON)) throw new Error(`screen daemon script missing: ${DAEMON}`);
+/** 让一份「不是自己」的 daemon 退场，别占着端口用旧代码应答。 */
+async function retire(port) {
+  try {
+    await rpc(port, { op: 'stop' }, 800);
+  } catch {
+    /* 停不掉也无所谓，后面靠端口后移 */
+  }
+  await sleep(250);
+}
 
+function spawnDaemon(basePort) {
   let fd = 'ignore';
   try {
     fd = openSync(DAEMON_LOG, 'a');
   } catch {
     /* 日志打不开也照常启动 */
   }
-  // 注意：这里**不能**用 detached。实测在本环境里，detached 子进程会立刻 exit=0 退出、
-  // 根本不执行脚本（对照实验：detached 三种组合全 FAIL，不 detached 立刻绑上端口）。
+  // 注意：这里**不能**用 detached。实测本环境里 detached 子进程会立刻 exit=0 退出。
   const child = spawn(
     resolvePowerShell(),
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', DAEMON, '-Port', String(basePort)],
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      DAEMON,
+      '-Port',
+      String(basePort),
+      '-Version',
+      VERSION,
+    ],
     { cwd: RUNTIME, stdio: ['ignore', fd, fd], windowsHide: true },
   );
   child.unref();
@@ -134,18 +186,34 @@ async function startDaemon(basePort) {
     }
   }
 
-  // spawn 失败（解释器找不到、被安全软件拦下）不会抛，只会发一个 error 事件
   let spawnError = null;
   child.on('error', (err) => {
     spawnError = err;
   });
+  return { child, spawnError: () => spawnError };
+}
 
-  const deadline = Date.now() + START_TIMEOUT_MS;
+/**
+ * 拉起一个守护进程，并用 ping 握手判断「就绪」，而不是靠固定 sleep。
+ * 6s 的意义是「多久没就绪」，不是「多久没起来」。
+ */
+async function startDaemon(basePort) {
+  if (!existsSync(DAEMON)) throw new Error(`screen daemon script missing: ${DAEMON}`);
+
+  const { child, spawnError } = spawnDaemon(basePort);
+  const deadline = Date.now() + (everStarted ? START_DEADLINE_RETRY_MS : START_DEADLINE_FIRST_MS);
+
   while (Date.now() < deadline) {
-    await sleep(250);
-    const port = readPort(basePort);
-    if (await ping(port)) return port;
-    if (spawnError) throw new Error(`cannot start PowerShell (${spawnError.message})`);
+    await sleep(120);
+    for (let port = basePort; port < basePort + PORT_SPAN; port++) {
+      const info = await pingInfo(port, 500);
+      if (info && hashMatches(info)) {
+        everStarted = true;
+        return port;
+      }
+    }
+    const err = spawnError();
+    if (err) throw new Error(`cannot start PowerShell (${err.message})`);
     if (child.exitCode !== null) {
       throw new Error(`screen daemon exited with code ${child.exitCode}; log: ${daemonLogTail()}`);
     }
@@ -155,18 +223,32 @@ async function startDaemon(basePort) {
   } catch {
     /* ignore */
   }
-  throw new Error(`screen daemon silent for ${START_TIMEOUT_MS}ms (port ${basePort}); log: ${daemonLogTail()}`);
+  throw new Error(
+    `screen daemon not ready within ${everStarted ? START_DEADLINE_RETRY_MS : START_DEADLINE_FIRST_MS}ms (port ${basePort}); log: ${daemonLogTail()}`,
+  );
 }
 
 /**
- * 兜底：没有守护进程时直接跑一次性采集（约 1.5～2.5 秒），
+ * 兜底：没有守护进程时直接跑一次性采集（约 1~2.5 秒），
  * 慢，但不会因为守护进程起不来就完全失明。
  */
-function runOnce(budget) {
+function runOnce(budget, values) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       resolvePowerShell(),
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', DAEMON, '-Once', '-Budget', String(budget)],
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        DAEMON,
+        '-Once',
+        '-Budget',
+        String(budget),
+        '-Version',
+        VERSION,
+      ],
       { cwd: RUNTIME, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let out = '';
@@ -199,30 +281,54 @@ function runOnce(budget) {
       }
       const line = out.trim().split(/\r?\n/).pop() || '';
       try {
-        resolve(JSON.parse(line));
+        const parsed = JSON.parse(line);
+        if (parsed && parsed.ok === false) {
+          reject(new Error(`one-shot read failed: ${parsed.error || 'unknown'}`));
+          return;
+        }
+        resolve(parsed);
       } catch {
         reject(new Error(`one-shot read returned unparsable output: ${line.slice(0, 200)}`));
       }
     });
+    void values; // 一次性路径固定不读控件文本
   });
 }
 
 async function ensureDaemon(basePort) {
-  if (readyPort !== null && (await ping(readyPort))) return readyPort;
-  readyPort = null;
+  if (readyPort !== null) {
+    const info = await pingInfo(readyPort, 600);
+    if (info && hashMatches(info)) return readyPort;
+    readyPort = null;
+  }
 
+  // 扫描端口：认得自己的才采纳，认不出的（旧版/别人的）请它退场
   for (let port = basePort; port < basePort + PORT_SPAN; port++) {
-    if (await ping(port)) {
+    const info = await pingInfo(port, 500);
+    if (!info) continue;
+    if (hashMatches(info)) {
       readyPort = port;
+      noteSuccess();
       return port;
     }
+    await retire(port);
+  }
+
+  if (Date.now() < nextTryAt) {
+    const left = Math.ceil((nextTryAt - Date.now()) / 1000);
+    throw new Error(`screen daemon in backoff (${left}s left after ${failures} failures)`);
   }
 
   if (!starting) {
     starting = startDaemon(basePort)
       .then((port) => {
         readyPort = port;
+        noteSuccess();
         return port;
+      })
+      .catch((err) => {
+        noteFailure();
+        throw err;
       })
       .finally(() => {
         starting = null;
@@ -233,7 +339,8 @@ async function ensureDaemon(basePort) {
 
 function oneLine(value, max) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return max && text.length > max ? `${text.slice(0, max)}…` : text;
+  if (!max || text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
 }
 
 /**
@@ -269,10 +376,11 @@ function formatDigest(digest) {
 }
 
 const DESCRIPTION = [
-  "Look at what the user is looking at right now on their Windows desktop, without screenshots:",
-  'foreground app, window title, focused control with its text, and the other open windows, as a short summary.',
+  'Look at what the user is looking at right now on their Windows desktop, without screenshots:',
+  'foreground app, window title, focused control, and the other open windows, as a short summary.',
   "Use it when the user refers to something on their screen ('this', 'my screen', 'what do you see') or when their current app would change your answer;",
-  'skip it otherwise. Password fields and password managers are reported as redacted.',
+  'skip it otherwise. The text inside a text box is only read when you pass include_text:true;',
+  'password fields and password managers are always redacted.',
 ].join(' ');
 
 /**
@@ -298,6 +406,11 @@ export function apply(ctx, config = {}) {
             description:
               'Summary size in tokens: 25 = app and title only, 60 = adds the focused control, 220 = adds the other open windows. Default 220.',
           },
+          include_text: {
+            type: 'boolean',
+            description:
+              'Also read the text currently inside the focused text box. Off by default; only ask for it when that text actually matters.',
+          },
         },
       },
       output: {
@@ -313,14 +426,15 @@ export function apply(ctx, config = {}) {
       async execute(args) {
         const raw = Number(args?.budget);
         const budget = Number.isFinite(raw) ? Math.min(400, Math.max(25, Math.round(raw))) : defaultBudget;
+        const values = args?.include_text === true;
 
         let res = null;
         try {
           const port = await ensureDaemon(basePort);
-          res = await rpc(port, { op: 'digest', budget }, 4000);
+          res = await rpc(port, { op: 'digest', budget, values }, 4000);
         } catch {
-          // 守护进程那条路过不去（起不来 / 半路死了），退回一次性采集
-          res = await runOnce(budget);
+          // 守护进程那条路过不去（起不来 / 半路死了 / 在退避期），退回一次性采集
+          res = await runOnce(budget, values);
         }
         if (!res || res.ok !== true) {
           throw new Error(`screen read failed: ${(res && res.error) || 'no response'}`);

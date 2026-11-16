@@ -1,6 +1,6 @@
 {
   "name": "dsh-whale-eyes",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Give the DeepSeek Harness model a screen-sense tool: foreground app, window title, focused control and open windows as a short summary — no screenshots. 给 DSH 的模型一双不截屏的眼睛。",
   "type": "module",
   "main": "./index.js",
@@ -41,7 +41,8 @@
     "win32"
   ],
   "scripts": {
-    "check": "node --check index.js"
+    "check": "node --check index.js && node scripts/check-bom.mjs",
+    "prepack": "node scripts/check-bom.mjs"
   },
   "keywords": [
     "dsh",

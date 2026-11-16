@@ -2,6 +2,65 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] — 2026-11-16
+
+这一版是「按需采集」重写：守护进程平时几乎不做事，被调用才看一眼。
+
+### 变更（行为语义）
+
+- **常驻循环不再每 250ms 做一次全量 UIA 扫窗**。现在只有两件事：`Socket.Poll(100ms)` 等请求，加一条 Win32 级的窗口变更流。UIA 只在 `digest` 这类真的要看的时候读一次。
+- **`events` 降级为窗口级**（`granularity: "window"`）：记的是「哪个程序、哪个标题、什么时候换的」，不再保证控件级细节。有人调用 `events` 后 120 秒内以 1s 轮询，其余时间退到 5s。
+- 焦点元素是窗口/文档这一层、或没有名字也没有值的容器时，**折叠不再输出**（以前会和 `win` 行重复）。
+- 窗口列表改用 `EnumWindows`（过滤不可见窗和工具窗），不再走 UIA。
+- `digest` **默认不读控件文本**；要读得显式 `values: true`，工具侧对应参数 `include_text`。
+- `captures` 默认**只报数不删**；删除必须显式 `prune: true`（`keep` 默认 20）。
+
+### 修复
+
+- `screen` 报「找不到类型 System.Windows.Forms.SystemInformation」：改用 `GetSystemMetrics`，彻底不依赖 WinForms。
+- **隐私顺序**：先判断是不是密码管理器再碰 UIA；`IsPassword` 作为读值前的第一道闸，抛异常一律按密文处理。黑名单补到 10 个。
+- `pages` 连不上 CDP 时原来空等 2.1 秒：先 150ms 探端口，不通直接返回提示。
+- `ping`/`info` 的版本号不再写死，由插件从 `package.json` 传入；新增 `sha256`、`pid`、`started`。
+- 端口文件不再影响启动：插件侧改为扫描端口并用 **脚本 sha256** 认亲和，认不出的旧 daemon 会先请它退场（治「装的是新的、跑的是旧的」）。
+- 插件侧启动失败改为**指数退避**（1→2→4→…→60s，成功即清零），不再每次调用都等满超时；就绪判定改成 ping 握手，冷装 10s / 热启 4s。
+- 连接设 `ReceiveTimeout`，半开连接不会让 daemon 卡死在 `Read` 上。
+- 启动时设 PerMonitorV2 DPI 感知，125%/150% 缩放下坐标不再偏。
+
+### 实测（本机 Win11 / PowerShell 5.1）
+
+| 项目 | 0.1.3 | 0.2.0 |
+|---|---|---|
+| 空转 CPU（30s 待机，单核百分比） | 13.4% | **0.47%** |
+| 内存 | 125 MB | 107 MB |
+| `digest` 热调用 | 32–284 ms | **11–16 ms** |
+| `digest` 冷启动（首次加载 UIA） | — | 383 ms |
+| 一段摘要的 token | 164 | 119 |
+
+优化过程（留档，免得下次又绕一遍）：把 250ms 全量 UIA 轮询拆成 Win32 + 按需之后仍有 5%；热循环里三处 `Get-Date`（cmdlet，每次 1~2ms）换成 `[DateTime]::UtcNow` 后降到 0.47%。
+
+### 已知限制
+
+- `events` 只有窗口级。控件级变更流要做 `SetWinEventHook` + `MsgWaitForMultipleObjects`，PowerShell 里写消息泵不划算，留给下一步。
+- 首次 `digest` 有约 0.4s 的 UIA 程序集冷加载；`digest` 返回里带 `cold: true`，模型不会误判成坏了。
+- 脚本文件必须是 **UTF-8 with BOM**：PowerShell 5.1 按 ANSI 读无 BOM 的中文注释会串字节、把引号吃掉（0.2.0 开发时踩过）。
+
+## [0.1.3] — 2026-11-06
+
+### 新增
+
+- **`info` 诊断操作**：一次请求就能看到版本号、当前端口、脚本根目录（长度）、截图目录是否存在。排查「装了却用不了」时不用再猜。
+
+### 修复
+
+- **`captures` 清空截图时报 `无法将参数绑定到参数"Path"，因为该参数为空字符串`**：代码里 `$dir` 本身是对的，问题是常驻守护进程跑的还是旧进程、没加载到新代码。重启守护进程后恢复（实测返回 `{"ok":true,"removed":1}`）。
+- **`ping` 返回的版本号与包版本对齐**：之前一直报 `0.2.0`，容易让人以为装错。
+
+### 实测
+
+- `info`：`root_len` 90，`captures_ok` true
+- `captures` 清空：正常返回 `removed`
+- `region` 200×100：66 ms，约 27 token
+
 ## [0.1.2] — 2026-11-06
 
 ### 修复
