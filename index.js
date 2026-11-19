@@ -1,5 +1,5 @@
 /**
- * dsh-whale-eyes — 给模型一只不截屏的眼睛。 0.2.0
+ * dsh-whale-eyes — 给模型一只不截屏的眼睛。 0.3.0
  *
  * 做三件事：
  *   1. 确保屏幕守护进程（PowerShell + UI Automation）在跑，不截屏
@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync, statSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -70,6 +70,22 @@ export const inject = ['tools'];
 let readyPort = null;
 let starting = null;
 let everStarted = false;
+
+// 本机调用方凭据：每次拉起 daemon 现生成，通过命令行传入；daemon 会把它写进
+// runtime/daemon.token，插件采纳「已经跑着的那份」时从文件读回。
+// 说明：同用户进程可读该文件，所以它挡的是「别的软件顺手调用」，不是同用户恶意进程。
+const TOKEN_FILE = path.join(RUNTIME, 'daemon.token');
+let token = null;
+
+function loadToken() {
+  try {
+    const v = readFileSync(TOKEN_FILE, 'utf8').trim();
+    token = v || null;
+  } catch {
+    token = null;
+  }
+  return token;
+}
 
 // 失败退避：1 → 2 → 4 → … → 60s。守护进程一时起不来时，别让每次调用都等满超时。
 let failures = 0;
@@ -162,7 +178,7 @@ function daemonLogTail(max = 800) {
 /** 让一份「不是自己」的 daemon 退场，别占着端口用旧代码应答。 */
 async function retire(port) {
   try {
-    await rpc(port, { op: 'stop' }, 800);
+    await rpc(port, { op: 'stop', token }, 1500);
   } catch {
     /* 停不掉也无所谓，后面靠端口后移 */
   }
@@ -176,6 +192,7 @@ function spawnDaemon(basePort) {
   } catch {
     /* 日志打不开也照常启动 */
   }
+  token = randomBytes(16).toString('hex');
   // 注意：这里**不能**用 detached。实测本环境里 detached 子进程会立刻 exit=0 退出。
   const child = spawn(
     resolvePowerShell(),
@@ -190,6 +207,8 @@ function spawnDaemon(basePort) {
       String(basePort),
       '-Version',
       VERSION,
+      '-Token',
+      token,
     ],
     { cwd: RUNTIME, stdio: ['ignore', fd, fd], windowsHide: true },
   );
@@ -313,21 +332,28 @@ function runOnce(budget, values) {
 }
 
 async function ensureDaemon(basePort) {
+  // 已认过的那份：给足 1.5s 再判。单线程 daemon 在 digest/region/pages 期间答不了 ping，
+  // 600ms 就判死会「杀掉正确、只是正忙」的那份（0.2.2 复核 ③1）。
   if (readyPort !== null) {
-    const info = await pingInfo(readyPort, 600);
-    if (info && hashMatches(info)) return readyPort;
+    const info = await pingInfo(readyPort, 1500);
+    if (info && hashMatches(info)) {
+      if (token === null) loadToken();
+      return readyPort;
+    }
     readyPort = null;
   }
 
-  // 扫描端口：认得自己的才采纳，认不出的（旧版/别人的）请它退场
+  // 扫描端口：认得自己的才采纳；有应答但指纹不符的，才请它退场（超时不算不符）
   for (let port = basePort; port < basePort + PORT_SPAN; port++) {
-    const info = await pingInfo(port, 500);
+    const info = await pingInfo(port, 800);
     if (!info) continue;
     if (hashMatches(info)) {
       readyPort = port;
+      loadToken();
       noteSuccess();
       return port;
     }
+    loadToken();
     await retire(port);
   }
 
@@ -397,7 +423,7 @@ const DESCRIPTION = [
   'foreground app, window title, focused control, and the other open windows, as a short summary.',
   "Use it when the user refers to something on their screen ('this', 'my screen', 'what do you see') or when their current app would change your answer;",
   'skip it otherwise. The text inside a text box is only read when you pass include_text:true;',
-  'password fields and password managers are always redacted.',
+  'password fields are never read, and windows belonging to known password managers are left out of the list.',
 ].join(' ');
 
 /**
@@ -448,7 +474,7 @@ export function apply(ctx, config = {}) {
         let res = null;
         try {
           const port = await ensureDaemon(basePort);
-          res = await rpc(port, { op: 'digest', budget, values }, 4000);
+          res = await rpc(port, { op: 'digest', budget, values, token }, 4000);
         } catch {
           // 守护进程那条路过不去（起不来 / 半路死了 / 在退避期），退回一次性采集
           res = await runOnce(budget, values);
@@ -466,6 +492,14 @@ export function apply(ctx, config = {}) {
       console.warn('[whale-eyes] screen daemon unavailable:', err && err.message ? err.message : err);
     });
 
-    return dispose;
+    // 卸载/禁用插件时把我们拉起的那份也收走：否则 DSH 退了它还常驻（107MB / 0.5%）
+    return () => {
+      const port = readyPort;
+      readyPort = null;
+      if (port !== null) {
+        void rpc(port, { op: 'stop', token }, 1200).catch(() => {});
+      }
+      dispose();
+    };
   }, 'whale-eyes tool');
 }

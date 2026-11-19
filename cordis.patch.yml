@@ -1,6 +1,6 @@
 # dsh-whale-eyes bundle patch
 #
-# 一行主机插件：注册 screen_sight 工具，让模型能「看一眼」主人的屏幕。
+# 一行主机插件：注册 screen_sight 工具，让模型能「看一眼」用户的屏幕。
 # 采集在 runtime/daemon.ps1（UI Automation，不截屏），这里只是外壳。
 - insert:
     - id: whale-eyes

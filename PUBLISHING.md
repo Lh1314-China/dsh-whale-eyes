@@ -18,24 +18,17 @@ npm --version     # 本机 11.20.0（发 npm 才需要）
 
 ---
 
-## 1. 建 GitHub 仓库并推送
+## 1. GitHub 仓库（已存在）
 
-**网页端**新建一个**空**仓库（不要勾选 README / .gitignore / License，否则会和本地文件打架）：
-
-- 仓库名：`dsh-whale-eyes`
-- 可见性：公开（私有仓库也能装，但需要本机 git 凭据）
-
-**本地**初始化并推上去：
+仓库已经在：<https://github.com/Lh1314-China/dsh-whale-eyes>。发布新版本直接推：
 
 ```powershell
-cd C:\Users\L1361\Documents\deepseek-harness\default-workspace\plugins\dsh-whale-eyes
+cd dsh-whale-eyes
 
-git init -b main
-git add .
-git commit -m "feat: dsh-whale-eyes 0.1.0 — 不截屏的屏幕感知工具"
-
-git remote add origin https://github.com/Lh1314-China/dsh-whale-eyes.git
-git push -u origin main
+git add -A
+git commit -m "feat: dsh-whale-eyes <version>"
+git push origin main
+git push origin v<version>
 ```
 
 > `package.json` 里的 `repository` / `homepage` / `bugs` 已经按 `Lh1314-China` 填好。如果 GitHub 用户名不是这个，改这三处就行。
@@ -66,14 +59,14 @@ dsh plugin --profile desktop add github:Lh1314-China/dsh-whale-eyes
 
 ## 3. 发 npm（可选，但装起来最省事）
 
-包名 `dsh-whale-eyes` 目前**在 npm 上没被占用**（查过返回 404）。
+包名 `dsh-whale-eyes` 已在 npm 上发布。
 
 ```powershell
 npm login            # 浏览器授权
 npm publish          # 公开包，默认 public
 ```
 
-发完以后，别人（和主人自己换机器时）在「添加插件」里只填包名就行：
+发完以后，别人（和你自己换机器时）在「添加插件」里只填包名就行：
 
 ```
 dsh-whale-eyes
@@ -130,10 +123,29 @@ npm publish
 ---
 
 ## 7. 发布前最后一遍清单
-
 - [ ] `node --check index.js` 通过
 - [ ] `package.json` 的 `version` 与 `CHANGELOG.md` 一致
 - [ ] `files` 白名单里没有漏掉新增文件
 - [ ] `README.md` 里的仓库地址、安装命令和实际一致
 - [ ] 本地装一次、调用一次 `screen_sight` 成功
 - [ ] `git status` 干净，`runtime/port.txt`、`captures/` 没进暂存区
+- [ ] `npm run check` 通过（BOM + PowerShell 解析断言）
+
+---
+
+## 8. 回滚（link 安装 / tgz 安装都适用）
+
+出问题时按「代码 → 进程 → 重启 → 验证」四步来，别先怀疑插件坏了：
+
+```powershell
+cd dsh-whale-eyes
+git checkout v0.2.2          # 换成任意上一个 tag
+```
+
+1. **代码**：`git checkout <上一个 tag>`。link 安装时，profile 指的就是这个目录，改完即生效（要重启 DSH 才会重新加载 JS 模块）。
+2. **旧的 daemon 会自愈**：文件回滚后 `sha256` 变了，插件下次调用会先把它 retire 掉再拉起新的。所以「看起来没变」时，**先看 `ping` 返回的 sha256**，别急着删插件。
+3. **手工收尾**（可选）：`Stop-Process -Id <ping.pid>`；或如果装的是 tgz，`npm i <旧版 tgz>` 后重启。
+4. **重启**：从桌面快捷方式/开始菜单正常启动，**不要经其他宿主或 AI 客户端拉进程**（会继承对方精简后的 PATH）。
+5. **验证**：`screen_sight` 跑两遍 + `ping` 看 version/sha256 与本地文件一致。
+
+**留的包**：仓库目录里保留 `dsh-whale-eyes-<version>.tgz`（gitignore，不进仓库），至少留最近两版。

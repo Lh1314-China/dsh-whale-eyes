@@ -1,5 +1,5 @@
 ﻿<#
-  dsh-whale-eyes / runtime daemon — 0.2.0
+  dsh-whale-eyes / runtime daemon — 0.3.0
 
   设计（0.2.0 重写，2026-11-16）：
   - 常驻循环只做两件便宜事：等 socket（Socket.Poll 100ms）+ Win32 层的窗口变更（500ms 一次，
@@ -28,7 +28,11 @@ param(
     [string]$Version = "",
     [switch]$Once,
     # 一次性模式也要能要控件文本：以前兜底路径静默忽略 include_text
-    [switch]$Values
+    [switch]$Values,
+    # 本机调用方凭据（插件每次拉起时生成）；空 = 不鉴权（兼容旧调用方）
+    [string]$Token = "",
+    # 截图默认关：不开这个开关，region/screen 一律拒绝
+    [switch]$AllowCapture
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,8 +62,8 @@ namespace WY {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 
-    // 窗口列表只是标题：走 EnumWindows 就够，不必碰 UIA（不跨进程、不拖别人）
-    public static string[] ListWindowTitles(int max, string exclude) {
+    // 窗口列表：连 pid 一起回（pid|title），让上层能按进程名过滤黑名单
+    public static string[] ListWindowInfos(int max, string exclude) {
       var list = new System.Collections.Generic.List<string>();
       EnumWindows(delegate(IntPtr h, IntPtr l) {
         if (!IsWindowVisible(h)) return true;
@@ -69,7 +73,9 @@ namespace WY {
         var t = sb.ToString().Trim();
         if (t.Length == 0) return true;
         if (exclude != null && t == exclude) return true;
-        list.Add(t);
+        uint pid = 0;
+        GetWindowThreadProcessId(h, out pid);
+        list.Add(pid.ToString() + "|" + t);
         return list.Count < max;
       }, IntPtr.Zero);
       return list.ToArray();
@@ -86,25 +92,35 @@ $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 
 $script:Version = if ($Version) { $Version } else { "0.0.0" }
-$script:Started = Get-Date
+$script:StartedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $script:ScriptHash = try { (Get-FileHash (Join-Path $PSScriptRoot "daemon.ps1") -Algorithm SHA256).Hash } catch { "" }
+$script:Token = $Token
+$script:TokenFile = Join-Path $PSScriptRoot "daemon.token"
+# 令牌落盘：插件重连/采纳已有的 daemon 时要用；同用户进程可读，属「防误触/防顺手调用」，
+# 不是防同用户恶意进程的安全边界（文档里写清楚，别自欺）。
+if ($script:Token -and -not $Once) {
+    try { Set-Content -Path $script:TokenFile -Value $script:Token -Encoding ASCII -NoNewline } catch { }
+}
 $script:lastPid = [uint32]0
 $script:lastProc = ""
+$script:procCache = @{}
 $script:firstDigest = $true
 $script:sbTitle = New-Object System.Text.StringBuilder 512
+$script:sbClass = New-Object System.Text.StringBuilder 256
 
 function Get-ClassOf([IntPtr]$hwnd) {
-    $cb = New-Object System.Text.StringBuilder 256
-    [void][WY.Win32]::GetClassName($hwnd, $cb, 256)
-    return $cb.ToString()
+    [void]$script:sbClass.Clear()
+    [void][WY.Win32]::GetClassName($hwnd, $script:sbClass, 256)
+    return $script:sbClass.ToString()
 }
 
 function Get-ProcNameOf([uint32]$procId) {
-    if ($procId -eq $script:lastPid -and $script:lastProc) { return $script:lastProc }
+    $key = [string]$procId
+    if ($script:procCache.ContainsKey($key)) { return $script:procCache[$key] }
     $name = ""
     try { $name = [System.Diagnostics.Process]::GetProcessById([int]$procId).ProcessName } catch { }
-    $script:lastPid = $procId
-    $script:lastProc = $name
+    if ($script:procCache.Count -gt 200) { $script:procCache.Clear() }
+    $script:procCache[$key] = $name
     return $name
 }
 
@@ -219,13 +235,19 @@ function Get-FocusState([bool]$values) {
 }
 
 # ---- 窗口列表：EnumWindows，Win32 就够 -----------------------------------
-function Read-Windows([string]$foregroundTitle, [int]$max = 8) {
+function Read-Windows([string]$foregroundTitle, [int]$max = 5) {
     $out = New-Object System.Collections.ArrayList
     $seen = New-Object System.Collections.Generic.HashSet[string]
     try {
-        $raw = [WY.Win32]::ListWindowTitles(($max + 6), $foregroundTitle)
-        foreach ($t in $raw) {
-            $short = Limit-Text $t 30
+        $raw = [WY.Win32]::ListWindowInfos(($max + 6), $foregroundTitle)
+        foreach ($item in $raw) {
+            $sep = $item.IndexOf("|")
+            if ($sep -lt 0) { continue }
+            $wpid = 0
+            if (-not [int]::TryParse($item.Substring(0, $sep), [ref]$wpid)) { continue }
+            # 黑名单参与「其它窗口」：后台挂着的密码管理器，标题往往就是账号/库名
+            if (Test-AppBlocked (Get-ProcNameOf ([uint32]$wpid))) { continue }
+            $short = Limit-Text $item.Substring($sep + 1) 30
             if (-not $short) { continue }
             if ($short -eq (Limit-Text $foregroundTitle 30)) { continue }
             if (-not $seen.Add($short)) { continue }
@@ -249,10 +271,11 @@ function Get-Digest([int]$budget, [bool]$values) {
     }
 
     $focus = Get-FocusState $values
-    # focus 就是「窗口/文档」这一层时折叠掉：它和 win 行是同一句话
-    if ($focus -and $focus.hwnd -ne 0 -and $focus.hwnd -eq $fg.hwnd) { $focus = $null }
-    if ($focus -and $focus.name -and $focus.name -eq $fg.title -and
-        (@("Window", "Document", "Pane", "Client", "Group") -contains $focus.role)) { $focus = $null }
+    # focus 折叠：只有「它本身就是窗口/文档层」才折；UWP/Electron 给内层控件报顶层 hwnd，
+    # 那时候 hwnd 相等不代表没信息（0.2.2 复核 :27）。
+    $topRoles = @("Window", "Document", "Pane", "Client", "Group")
+    if ($focus -and $focus.hwnd -ne 0 -and $focus.hwnd -eq $fg.hwnd -and $topRoles -contains $focus.role) { $focus = $null }
+    if ($focus -and $focus.name -and $focus.name -eq $fg.title -and $topRoles -contains $focus.role) { $focus = $null }
     # 没名字也没值的容器（Pane/Group）说明不了任何事，别占 token
     if ($focus -and -not $focus.name -and -not $focus.value) { $focus = $null }
 
@@ -337,12 +360,12 @@ if ($Once) {
 $events = New-Object System.Collections.ArrayList
 $seq = 0
 $lastKey = ""
-$lastWinPoll = [datetime]::MinValue
+$lastWinPoll = 0
 $boundPort = 0
 $listener = $null
-$script:iter = 0
-$script:ready = 0
-$lastEventsAsk = [datetime]::MinValue
+$iter = 0
+$ready = 0
+$lastEventsAsk = 0
 
 for ($p = $Port; $p -lt ($Port + 10); $p++) {
     try {
@@ -359,14 +382,15 @@ if (-not $listener) { Write-Error "端口 $Port ~ $($Port + 9) 都被占用"; ex
 try { Set-Content -Path (Join-Path $PSScriptRoot "port.txt") -Value $boundPort -Encoding ASCII } catch { }
 
 $run = $true
+$sock = $listener.Server
 while ($run) {
     $iter++
-    # 用静态 UtcNow：Get-Date 是 cmdlet，一次 1~2ms，热循环里三圈就白烧 1%
-    $now = [DateTime]::UtcNow
+    # epoch 毫秒：DateTime 相减要走引擎的运算符绑定 + 建 TimeSpan 对象，是「Get-Date 之后的第二个地板」
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     # Win32 层变更流：热路径只取一个 key 字符串，变了才建对象（建对象约 10ms，不能每秒都做）
     # 没人订阅 events 时退到 5s：这个 daemon 的常态是「没人看」
-    $pollEvery = if (($now - $lastEventsAsk).TotalSeconds -lt 120) { 1000 } else { 5000 }
-    if (($now - $lastWinPoll).TotalMilliseconds -ge $pollEvery) {
+    $pollEvery = if (($now - $lastEventsAsk) -lt 120000) { 1000 } else { 5000 }
+    if (($now - $lastWinPoll) -ge $pollEvery) {
         $lastWinPoll = $now
         try {
             $hwnd = [WY.Win32]::GetForegroundWindow()
@@ -391,7 +415,7 @@ while ($run) {
     }
 
     $readable = $false
-    try { $readable = $listener.Server.Poll(100000, [System.Net.Sockets.SelectMode]::SelectRead) } catch { Start-Sleep -Milliseconds 100 }
+    try { $readable = $sock.Poll(100000, [System.Net.Sockets.SelectMode]::SelectRead) } catch { Start-Sleep -Milliseconds 100 }
     if (-not $readable) { continue }
     $ready++
 
@@ -409,8 +433,14 @@ while ($run) {
             $line = $reader.ReadLine()
             if (-not $line) { continue }
             $req = $line | ConvertFrom-Json
+            # 鉴权：ping/info 开（只回版本与路径），其余 op 在设了令牌时必须带对
+            $needAuth = (@("digest", "events", "pages", "region", "screen", "captures", "stop") -contains [string]$req.op)
+            if ($needAuth -and $script:Token -and ([string]$req.token -ne [string]$script:Token)) {
+                $req = [pscustomobject]@{ op = "__unauth" }
+            }
             $resp = $null
             switch ($req.op) {
+                "__unauth" { $resp = [ordered]@{ ok = $false; error = "unauthorized" } }
                 "ping" {
                     $resp = [ordered]@{
                         ok      = $true
@@ -418,8 +448,8 @@ while ($run) {
                         sha256  = $script:ScriptHash
                         pid     = $PID
                         port    = $boundPort
-                        started = [int]([datetimeoffset]$script:Started).ToUnixTimeSeconds()
-                        up_s    = [int]((Get-Date) - $script:Started).TotalSeconds
+                        started = [int][math]::Floor($script:StartedMs / 1000)
+                        up_s    = [int](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:StartedMs) / 1000)
                         seq     = $seq
                     }
                 }
@@ -442,12 +472,12 @@ while ($run) {
                 "digest" {
                     $budget = if ($req.budget) { [int]$req.budget } else { 220 }
                     $values = [bool]$req.values
-                    $t0 = Get-Date
+                    $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                     $packed = Get-Digest $budget $values
                     $resp = [ordered]@{
                         ok     = $true
                         cold   = $script:firstDigest
-                        ms     = [int]((Get-Date) - $t0).TotalMilliseconds
+                        ms     = [int]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $t0)
                         tokens = $packed.tokens
                         budget = $budget
                         digest = $packed.data
@@ -455,7 +485,7 @@ while ($run) {
                     $script:firstDigest = $false
                 }
                 "events" {
-                    $lastEventsAsk = [DateTime]::UtcNow
+                    $lastEventsAsk = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                     $since = if ($null -ne $req.since) { [int]$req.since } else { 0 }
                     $resp = [ordered]@{ ok = $true; granularity = "window"; poll_ms = 1000; events = @($events | Where-Object { $_.seq -gt $since }) }
                 }
@@ -471,17 +501,26 @@ while ($run) {
                         }
                         break
                     }
-                    $t0 = Get-Date
+                    $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                     $pgs = @(Get-CdpPages -Port $cdpPort)
                     $resp = [ordered]@{
                         ok    = $true
-                        ms    = [int]((Get-Date) - $t0).TotalMilliseconds
+                        ms    = [int]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $t0)
                         count = $pgs.Count
                         pages = $pgs
                         error = $script:CdpLastError
                     }
                 }
                 "region" {
+                    if (-not $AllowCapture) {
+                        $resp = [ordered]@{ ok = $false; error = "capture disabled; start daemon with -AllowCapture" }
+                        break
+                    }
+                    $fgc = Get-WinState
+                    if (Test-AppBlocked $fgc.app) {
+                        $resp = [ordered]@{ ok = $false; error = "foreground is a blocked app" }
+                        break
+                    }
                     $x = [int]($req.x); $y = [int]($req.y)
                     $w = [int]($req.w); $h = [int]($req.h)
                     $scale = if ($req.scale) { [double]$req.scale } else { 0.5 }
@@ -489,9 +528,9 @@ while ($run) {
                         $resp = [ordered]@{ ok = $false; error = "w/h must be > 0" }
                         break
                     }
-                    $t0 = Get-Date
+                    $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                     $shot = Get-ScreenRegion -X $x -Y $y -W $w -H $h -Scale $scale
-                    $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+                    $ms = [int]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $t0)
                     if ($shot) {
                         $resp = [ordered]@{
                             ok = $true; ms = $ms; file = $shot.file
@@ -503,6 +542,15 @@ while ($run) {
                     }
                 }
                 "screen" {
+                    if (-not $AllowCapture) {
+                        $resp = [ordered]@{ ok = $false; error = "capture disabled; start daemon with -AllowCapture" }
+                        break
+                    }
+                    $fgc = Get-WinState
+                    if (Test-AppBlocked $fgc.app) {
+                        $resp = [ordered]@{ ok = $false; error = "foreground is a blocked app" }
+                        break
+                    }
                     $scale = if ($req.scale) { [double]$req.scale } else { 0.5 }
                     $vx = [WY.Win32]::GetSystemMetrics(76)
                     $vy = [WY.Win32]::GetSystemMetrics(77)
@@ -512,9 +560,9 @@ while ($run) {
                         $resp = [ordered]@{ ok = $false; error = "no virtual screen metrics" }
                         break
                     }
-                    $t0 = Get-Date
+                    $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                     $shot = Get-ScreenRegion -X $vx -Y $vy -W $vw -H $vh -Scale $scale
-                    $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+                    $ms = [int]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $t0)
                     if ($shot) {
                         $resp = [ordered]@{
                             ok = $true; ms = $ms; file = $shot.file
@@ -557,4 +605,7 @@ while ($run) {
 }
 
 try { $listener.Stop() } catch { }
+# 退出时清掉自己的痕迹：端口文件与令牌不该留在盘上（0.2.2 复核 ①7）
+try { Remove-Item (Join-Path $PSScriptRoot "port.txt") -Force -ErrorAction SilentlyContinue } catch { }
+try { if ($script:Token) { Remove-Item $script:TokenFile -Force -ErrorAction SilentlyContinue } } catch { }
 Write-Output "daemon stopped"

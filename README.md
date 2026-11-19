@@ -6,9 +6,9 @@
 
 ```
 app: DeepSeek Harness
-win: DSH插件：低token实现屏幕视觉 — DeepSeek Harness
-focus: Document "DSH插件：低token实现屏幕视觉 — DeepSeek Harness" = dsh-app://app/
-wins: 中转站 | GitHub | 本地磁盘 (D:) - 文件资源管理器 | SakuraCat
+win: 设置 — DeepSeek Harness
+focus: Document "设置 — DeepSeek Harness" = dsh-app://app/
+wins: 记事本 | GitHub | 文件资源管理器 | 终端
 ```
 
 一次调用约 **55～75 token**，纯文本；不调用就没有额外开销。
@@ -40,10 +40,10 @@ https://github.com/Lh1314-China/dsh-whale-eyes
 dsh plugin --profile desktop add github:Lh1314-China/dsh-whale-eyes
 ```
 
-**2. npm（发布之后）**
+**2. npm（最简单）**
 
-```
-dsh-whale-eyes
+```powershell
+dsh plugin --profile desktop add dsh-whale-eyes
 ```
 
 **3. 本地目录**
@@ -126,4 +126,4 @@ $w.WriteLine('{"op":"digest","budget":220}')
 
 ## 许可
 
-[MIT](LICENSE) © 2026 小鲸 & 凌寒
+[MIT](LICENSE) © 2026 Lh1314-China

@@ -8,3 +8,4 @@ runtime/captures/
 Thumbs.db
 runtime/daemon.log
 runtime/cpu-*.json
+runtime/daemon.token

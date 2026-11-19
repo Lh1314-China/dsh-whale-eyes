@@ -2,6 +2,48 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] — 2026-11-16
+
+外部复核 0.2.2 后的一版。复核抓到的两条**不是性能问题，是安全问题**，这版按她的行号改。
+
+### 安全（复核 ②）
+
+- **`wins` 过去完全不过黑名单**：前台是记事本、后台挂着 Bitwarden，密码管理器的窗口标题（往往就是账号邮箱/库名）会原样进摘要。现在 `EnumWindows` 连 pid 一起回，按进程名过 `Test-AppBlocked` 再入列表。
+- **socket 零认证**：任何本机进程都能调 `digest`/`screen`/`stop`。现在插件每次拉起 daemon 生成 16 字节令牌（`-Token` 传入），daemon 写 `runtime/daemon.token`；`digest`/`events`/`pages`/`captures`/`stop` 必须带对令牌，`ping`/`info` 只回版本与路径。退出时删令牌文件。
+- **截图默认关闭**：`region`/`screen` 不带 `-AllowCapture` 一律拒绝；开着也先查前台是不是封禁应用，是就拒绝出图。
+- 工具描述的口径改准：不再写 "password managers are **always** redacted"（对 wins 和自定义输入框本来就不成立）。
+
+### 正确性（复核 ①③④）
+
+- **focus 折叠误判**：原来只判 `hwnd` 相等，UWP/Electron 给内层控件报的就是顶层 hwnd，真正的输入框被整条丢掉。现在要求 role ∈ Window/Document/Pane/Client/Group 才折。
+- `Read-Windows` 签名默认值 8 → 5（0.2.2 只改了调用点，签名里的 8 一直是活代码）。
+- **「跑新杀新」**：`ensureDaemon` 复认时原来 600ms ping 超时就当死，单线程 daemon 在 digest/region 期间答不了 ping，会被自己人 retire 掉。改成 1.5s，且只有「有应答但指纹不符」才退场，超时不算。
+- 卸载/禁用插件时 `stop` 我们拉起的那份，不再留孤儿进程（107MB / 0.5%）。
+- 版本号写进 `index.js` / `daemon.ps1` 文件头；`scripts/` 进 `files` 白名单（否则从 tgz 装出来的副本再打包时 prepack 找不到脚本）；prepack 增加**PowerShell 解析断言**（只验 BOM 不够，语法坏照样能打包）。
+- daemon 退出时删 `port.txt`。
+
+### 性能（复核 ①）
+
+- 热循环的两次 `DateTime` 相减换成 **epoch 毫秒整数比较**——复核提到的「Get-Date 之后的第二个地板」，减法不再走引擎绑定与 TimeSpan 分配。
+- `$iter` 用局部变量、`$listener.Server` 提到循环外、`Get-ClassOf` 复用 StringBuilder。
+- 请求计时也换 epoch：`digest` 报的 `ms` 不再把 `Get-Date` 的 2~4ms 算进采集耗时里。
+
+### 实测（10 分钟长跑，每秒采样；重启后）
+
+| 版本 | 均值 | p50 | p95 | p99 | 峰值 | 工作集 |
+|---|---|---|---|---|---|---|
+| 0.2.x（旧热循环） | 0.468% | 0 | 1.56% | 3.12% | 7.81% | 123 MB |
+| **0.3.0（epoch 毫秒）** | **0.244%** | 0 | 1.56% | 3.12% | **4.69%** | 107 MB |
+
+复核提到的「第二个地板」成立：只把 `DateTime` 相减换成 epoch 毫秒整数比较，均值就**砍掉近一半**；p99 没动（尖峰还是 5s 一次的窗口采样造成，不是引擎开销）。
+
+热调 `digest` 13–27ms（比 0.2.x 的 12–16ms 略高，因为 `wins` 现在要查进程名过黑名单；按 pid 缓存，只有首次冷调 465ms）。
+
+### 已知边界（写清楚，不自欺）
+
+- 令牌文件同用户可读——它挡的是「别的软件顺手调用」，**不是同用户恶意进程**；真正的边界要靠系统 ACL 或代码签名，这一版没做。
+- 截图默认关，Skill 文档里 `region` 的用法要带 `-AllowCapture` 才能用。
+
 ## [0.2.2] — 2026-11-16
 
 自检这一轮把 0.2.1 没点过的入口补上了，并修掉两处不一致。
