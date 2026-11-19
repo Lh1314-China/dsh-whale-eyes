@@ -9,3 +9,4 @@ Thumbs.db
 runtime/daemon.log
 runtime/cpu-*.json
 runtime/daemon.token
+SHA256SUMS.txt
