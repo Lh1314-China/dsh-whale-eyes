@@ -22,6 +22,13 @@ wins: 记事本 | GitHub | 文件资源管理器 | 终端
 | 速度 | 渲染 + 缩放 + 编码 | 一次本地 TCP 往返，10～30 ms |
 | 信息 | 像素，需要模型自己看 | 已经是「在哪个应用、哪个控件」 |
 
+## 前提
+
+- **Windows**：插件声明了 `os: ["win32"]`，其它系统会跳过安装。
+- DSH `>=0.2.1-rc.2`（见 `dsh.compatibility`），Node `>=20`。
+- 装完**重启 DSH** 才会加载新模块，`screen_sight` 才会出现。
+- 不需要模型、密钥或额外的外部程序：读的是 UI Automation 的结构化文本。
+
 ## 安装
 
 三种方式，任选其一。装完重启后自动生效，`screen_sight` 会出现在模型可用的工具里。
@@ -124,6 +131,10 @@ $w.WriteLine('{"op":"digest","budget":220}')
 - Electron / Chromium 应用在 UI Automation 里常常只暴露窗口层，需要 CDP 补齐（浏览器要开 `--remote-debugging-port`）。
 - 中文标题会被按字符截断，`…` 是截断标记，不是原文。
 
-## 许可
+## 许可与声明
 
 [MIT](LICENSE) © 2026 Lh1314-China
+
+- 只在本机 `127.0.0.1` 上通信，没有出站请求。
+- 不截屏、不传图、不读剪贴板；密码框固定输出 `[password]`，密码管理器整条显示 `[blocked]`。
+- 依赖 Windows UI Automation；Electron / Chromium 的标签页要靠 CDP 补，插件不替用户开端口。
